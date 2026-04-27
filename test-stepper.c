@@ -1,36 +1,38 @@
 /*==========================================================================
-// Author : Handson Technology
-// Project : Arduino Uno
-// Description : TB6600 Stepper Motor Driver
-// Source-Code : tb6600.ino
+// Auteur : Khaos "Kelshen" Viracocha
+// Project : jipanco - Hermes
+// Description : DM542T Stepper Motor Driver
 //==========================================================================
 */
-int PUL=19; //define Pulse pin
-int DIR=18; //define Direction pin
-int ENA=5; //define Enable Pin
+int PUL=19; // Pulse pin
+int DIR=18; // Direction pin
+int ENA=5; // Enable Pin
 void setup() {
  pinMode (PUL, OUTPUT);
  pinMode (DIR, OUTPUT);
  pinMode (ENA, OUTPUT);
 }
 
+digitalWrite(ENA,HIGH); // initialisation
+delayMicroseconds(100);
+
 void loop() {
+ digitalWrite(DIR,LOW);
+ delayMicroseconds(60);
  for (int i=0; i<6400; i++) //Forward 5000 steps
  {
- digitalWrite(DIR,LOW);
- digitalWrite(ENA,HIGH);
  digitalWrite(PUL,HIGH);
- delayMicroseconds(50);
+ delayMicroseconds(30);
  digitalWrite(PUL,LOW);
- delayMicroseconds(50);
+ delayMicroseconds(30);
  }
- for (int i=0; i<6400; i++) //Backward 5000 steps
+ digitalWrite(DIR,LOW);
+ delayMicroseconds(60);
+ for (int i=0; i<6400; i++) //Forward 5000 steps
  {
- digitalWrite(DIR,HIGH);
- digitalWrite(ENA,HIGH);
  digitalWrite(PUL,HIGH);
- delayMicroseconds(50);
+ delayMicroseconds(30);
  digitalWrite(PUL,LOW);
- delayMicroseconds(50);
+ delayMicroseconds(30);
  }
 }
