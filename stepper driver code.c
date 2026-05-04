@@ -7,13 +7,14 @@
 int DIR=5; // Direction pin
 int PUL=6; // Pulse pin
 int ENA=19; // Enable Pin
-int REV=1600; // Pulse/Rev
-int DLY=30; // Delay between pulses ( min 25 ) 
+
+int REV=1600; // Pulse/Rev calibré sur le Driver
+int DLY=30; // Delay between pulses (min 25) pour reguler la vitesse 
 
 void setup() {
- pinMode (PUL, OUTPUT);
- pinMode (DIR, OUTPUT);
  pinMode (ENA, OUTPUT);
+ pinMode (DIR, OUTPUT);
+ pinMode (PUL, OUTPUT);
 }
 
 digitalWrite(ENA,LOW); // initialisation
@@ -22,20 +23,20 @@ delayMicroseconds(100);
 void loop() {
  digitalWrite(DIR,LOW);
  delayMicroseconds(60);
- for (int i=0; i<1600; i++)
+ for (int i=0; i<REV+1; i++)
  {
  digitalWrite(PUL,HIGH);
- delayMicroseconds(30);
+ delayMicroseconds(DLY);
  digitalWrite(PUL,LOW);
- delayMicroseconds(30);
+ delayMicroseconds(DLY);
  }
- digitalWrite(DIR,LOW);
+ digitalWrite(DIR,HIGH);
  delayMicroseconds(60);
- for (int i=0; i<1600; i++)
+ for (int i=0; i<REV+1; i++)
  {
  digitalWrite(PUL,HIGH);
- delayMicroseconds(30);
+ delayMicroseconds(DLY);
  digitalWrite(PUL,LOW);
- delayMicroseconds(30);
+ delayMicroseconds(DLY);
  }
 }
