@@ -1,0 +1,404 @@
+#include <Arduino.h>
+#include <EEPROM.h>
+#include <Wire.h>
+#include <RTClib.h>
+
+// --- Pin configuration ---
+const int PIN_STEP = 6;
+const int PIN_DIR  = 5;
+const int PIN_ENA  = 19;
+const int PIN_BUTTON = 2; // button to GND, uses INPUT_PULLUP
+//const int PIN_BUTTON = 3; // button to GND, uses INPUT_PULLUP
+const int PIN_POT    = A12; // potentiometer wiper on Teensy 4.1 (A2 / ADC input)
+//const int PIN_POT    = A13; // potentiometer wiper on Teensy 4.1 (A2 / ADC input)
+
+
+const bool ENA_ACTIVE_HIGH = false; // false = active LOW (most common drivers)
+
+// --- Motor configuration ---
+const int STEPS_PER_REV = 3200; // 1.8° motor, full step
+
+// STEP pulse width (µs)
+const unsigned int STEP_HIGH_US = 4;
+
+// Motion speed while following targets
+const float MOVE_RPM = 130.0f;
+
+// Sequence and timing
+const unsigned long SEQUENCE_MS = 30000UL;
+const unsigned long SAMPLE_MS = 40UL;
+const uint16_t MAX_SAMPLES = SEQUENCE_MS / SAMPLE_MS; // 600 samples
+
+// Potentiometer software filter (EMA): lower alpha = smoother but slower response
+const float POT_FILTER_ALPHA = 0.12f;
+
+// Daily schedule for IDLE playback (24h format)
+uint8_t IDLE_START_HOUR = 10;
+uint8_t IDLE_START_MINUTE = 0;
+uint8_t IDLE_STOP_HOUR = 16;
+uint8_t IDLE_STOP_MINUTE = 35;
+
+// RTC setup on Wire2 (SDA2/SCL2): set to 1 for first upload, then back to 0.
+#define FORCE_SET_RTC_AT_BOOT 1
+#define RTC_SET_YEAR 2026
+#define RTC_SET_MONTH 4
+#define RTC_SET_DAY 29
+#define RTC_SET_HOUR 16
+#define RTC_SET_MINUTE 32
+#define RTC_SET_SECOND 30
+
+// EEPROM persistence
+const uint32_t EEPROM_MAGIC = 0x53545052; // "STPR"
+const uint16_t EEPROM_VERSION = 1;
+
+struct SequenceHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t sampleCount;
+  uint16_t sampleIntervalMs;
+  uint16_t checksum;
+};
+
+enum Mode {
+  MODE_IDLE,
+  MODE_RECORD
+};
+
+Mode mode = MODE_IDLE;
+
+uint16_t sequence[MAX_SAMPLES];
+uint16_t activeSampleCount = MAX_SAMPLES;
+
+unsigned long modeStartMs = 0;
+unsigned long lastSampleMs = 0;
+
+long currentPosition = 0;
+long targetPosition = 0;
+unsigned long lastStepMicros = 0;
+
+bool lastButtonRaw = HIGH;
+bool buttonStableState = HIGH;
+unsigned long lastDebounceMs = 0;
+const unsigned long DEBOUNCE_MS = 30;
+
+float potFilteredAdc = 0.0f;
+
+RTC_PCF8563 rtc;
+bool rtcReady = false;
+bool lastIdleAllowed = false;
+unsigned long lastRtcLogMs = 0;
+const unsigned long RTC_LOG_INTERVAL_MS = 10000UL;
+
+// --- Helpers ---
+void setEnable(bool on) {
+  digitalWrite(PIN_ENA, (ENA_ACTIVE_HIGH ? on : !on) ? HIGH : LOW);
+}
+
+// Convert RPM to steps-per-second
+float rpmToSps(float rpm) {
+  return rpm * STEPS_PER_REV / 60.0f;
+}
+
+void doOneStep(bool forward) {
+  digitalWrite(PIN_DIR, forward ? HIGH : LOW);
+  digitalWrite(PIN_STEP, HIGH);
+  delayMicroseconds(STEP_HIGH_US);
+  digitalWrite(PIN_STEP, LOW);
+
+  if (forward) {
+    currentPosition++;
+  } else {
+    currentPosition--;
+  }
+
+  // Keep position inside one revolution window
+  if (currentPosition >= STEPS_PER_REV) currentPosition = 0;
+  if (currentPosition < 0) currentPosition = STEPS_PER_REV - 1;
+}
+
+uint16_t computeChecksum(const uint16_t *data, uint16_t count) {
+  uint32_t sum = 0;
+  for (uint16_t i = 0; i < count; i++) {
+    sum += data[i];
+  }
+  return (uint16_t)(sum & 0xFFFF);
+}
+
+void buildDefaultSequence() {
+  for (uint16_t i = 0; i < MAX_SAMPLES; i++) {
+    float phase = (float)i / (float)(MAX_SAMPLES - 1); // 0..1 over 30s
+    // Triangle wave over one turn for a smooth demo animation
+    float tri = phase < 0.5f ? (phase * 2.0f) : (2.0f - phase * 2.0f);
+    sequence[i] = (uint16_t)(tri * (STEPS_PER_REV - 1));
+  }
+  activeSampleCount = MAX_SAMPLES;
+}
+
+bool loadSequenceFromEeprom() {
+  SequenceHeader header;
+  EEPROM.get(0, header);
+
+  if (header.magic != EEPROM_MAGIC) return false;
+  if (header.version != EEPROM_VERSION) return false;
+  if (header.sampleCount == 0 || header.sampleCount > MAX_SAMPLES) return false;
+  if (header.sampleIntervalMs != SAMPLE_MS) return false;
+
+  const int dataAddress = sizeof(SequenceHeader);
+  EEPROM.get(dataAddress, sequence);
+
+  uint16_t checksum = computeChecksum(sequence, header.sampleCount);
+  if (checksum != header.checksum) return false;
+
+  activeSampleCount = header.sampleCount;
+  return true;
+}
+
+void saveSequenceToEeprom() {
+  SequenceHeader header;
+  header.magic = EEPROM_MAGIC;
+  header.version = EEPROM_VERSION;
+  header.sampleCount = MAX_SAMPLES;
+  header.sampleIntervalMs = SAMPLE_MS;
+  header.checksum = computeChecksum(sequence, MAX_SAMPLES);
+
+  EEPROM.put(0, header);
+  EEPROM.put(sizeof(SequenceHeader), sequence);
+  activeSampleCount = MAX_SAMPLES;
+}
+
+void startRecordMode() {
+  mode = MODE_RECORD;
+  modeStartMs = millis();
+  lastSampleMs = 0;
+}
+
+void startIdleMode() {
+  mode = MODE_IDLE;
+  modeStartMs = millis();
+  lastSampleMs = 0;
+}
+
+bool isButtonPressedEvent() {
+  bool raw = digitalRead(PIN_BUTTON);
+  unsigned long now = millis();
+
+  if (raw != lastButtonRaw) {
+    lastDebounceMs = now;
+    lastButtonRaw = raw;
+  }
+
+  if ((now - lastDebounceMs) >= DEBOUNCE_MS && raw != buttonStableState) {
+    buttonStableState = raw;
+    if (buttonStableState == LOW) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+uint16_t readFilteredPotStep() {
+  int adcRaw = analogRead(PIN_POT); // 0..4095 on ESP32
+
+  // Exponential moving average for smoother manual control in RECORD mode.
+  potFilteredAdc = POT_FILTER_ALPHA * (float)adcRaw + (1.0f - POT_FILTER_ALPHA) * potFilteredAdc;
+
+  if (potFilteredAdc < 0.0f) potFilteredAdc = 0.0f;
+  if (potFilteredAdc > 4095.0f) potFilteredAdc = 4095.0f;
+
+  return (uint16_t)map((int)potFilteredAdc, 0, 4095, 0, STEPS_PER_REV - 1);
+}
+
+int circularDiff(int fromPos, int toPos) {
+  int diff = toPos - fromPos;
+  int halfTurn = STEPS_PER_REV / 2;
+
+  if (diff > halfTurn) diff -= STEPS_PER_REV;
+  if (diff < -halfTurn) diff += STEPS_PER_REV;
+
+  return diff;
+}
+
+int wrapPosition(int pos) {
+  while (pos >= STEPS_PER_REV) pos -= STEPS_PER_REV;
+  while (pos < 0) pos += STEPS_PER_REV;
+  return pos;
+}
+
+int minutesOfDay(uint8_t hour, uint8_t minute) {
+  return (int)hour * 60 + (int)minute;
+}
+
+bool isIdleAllowedNow() {
+  if (!rtcReady) return true;
+
+  DateTime now = rtc.now();
+  int nowMin = minutesOfDay((uint8_t)now.hour(), (uint8_t)now.minute());
+  int startMin = minutesOfDay(IDLE_START_HOUR, IDLE_START_MINUTE);
+  int stopMin = minutesOfDay(IDLE_STOP_HOUR, IDLE_STOP_MINUTE);
+
+  // Same start/stop means always enabled.
+  if (startMin == stopMin) return true;
+
+  // Normal window: start < stop (example 10:00 -> 22:00)
+  if (startMin < stopMin) {
+    return nowMin >= startMin && nowMin < stopMin;
+  }
+
+  // Overnight window: start > stop (example 22:00 -> 06:00)
+  return nowMin >= startMin || nowMin < stopMin;
+}
+
+void logRtcEvery10s() {
+  unsigned long nowMs = millis();
+  if (nowMs - lastRtcLogMs < RTC_LOG_INTERVAL_MS) return;
+  lastRtcLogMs = nowMs;
+
+  if (!rtcReady) {
+    Serial.println("[RTC] DS3231 non detecte");
+    return;
+  }
+
+  DateTime now = rtc.now();
+  char buf[48];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+           now.year(), now.month(), now.day(),
+           now.hour(), now.minute(), now.second());
+  Serial.print("[RTC] ");
+  Serial.print(buf);
+
+  Serial.print("  [MODE] ");
+  if (mode == MODE_RECORD) {
+    unsigned long recElapsed = (millis() - modeStartMs) / 1000;
+    Serial.print("RECORD ");
+    Serial.print(recElapsed);
+    Serial.print("s/");
+    Serial.print(SEQUENCE_MS / 1000);
+    Serial.print("s");
+  } else {
+    Serial.print("IDLE");
+    Serial.print(isIdleAllowedNow() ? " (actif)" : " (hors plage horaire)");
+  }
+  Serial.println();
+}
+
+void updateTargetFromRecord(unsigned long elapsedMs) {
+  if (elapsedMs > SEQUENCE_MS) elapsedMs = SEQUENCE_MS;
+
+  if (lastSampleMs == 0 || elapsedMs - lastSampleMs >= SAMPLE_MS) {
+    uint16_t idx = elapsedMs / SAMPLE_MS;
+    if (idx >= MAX_SAMPLES) idx = MAX_SAMPLES - 1;
+
+    uint16_t stepPos = readFilteredPotStep();
+
+    sequence[idx] = stepPos;
+    targetPosition = stepPos;
+    lastSampleMs = elapsedMs;
+  }
+}
+
+void updateTargetFromIdlePlayback(unsigned long elapsedMs) {
+  if (activeSampleCount == 0) return;
+
+  unsigned long loopMs = elapsedMs % SEQUENCE_MS;
+  uint16_t idx0 = loopMs / SAMPLE_MS;
+  if (idx0 >= activeSampleCount) idx0 = activeSampleCount - 1;
+
+  uint16_t idx1 = (idx0 + 1) % activeSampleCount;
+  float frac = (float)(loopMs % SAMPLE_MS) / (float)SAMPLE_MS;
+
+  int p0 = (int)sequence[idx0];
+  int p1 = (int)sequence[idx1];
+  int d = circularDiff(p0, p1);
+
+  int interp = p0 + (int)(d * frac);
+  targetPosition = wrapPosition(interp);
+}
+
+void runMotionController() {
+  if (targetPosition == currentPosition) return;
+
+  unsigned long nowUs = micros();
+  unsigned long periodUs = (unsigned long)(1000000.0f / rpmToSps(MOVE_RPM));
+  if (periodUs < STEP_HIGH_US + 2) periodUs = STEP_HIGH_US + 2;
+
+  if (nowUs - lastStepMicros < periodUs) return;
+  lastStepMicros = nowUs;
+
+  int error = circularDiff((int)currentPosition, (int)targetPosition);
+  bool forward = error > 0;
+
+  if (error == 0) return;
+  doOneStep(forward);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_STEP, OUTPUT);
+  pinMode(PIN_DIR,  OUTPUT);
+  pinMode(PIN_ENA,  OUTPUT);
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
+
+  analogReadResolution(12); // Teensy 4.1 ADC: 0..4095
+
+  digitalWrite(PIN_STEP, LOW);
+  digitalWrite(PIN_DIR,  HIGH);
+
+  setEnable(true);
+  delay(200);
+
+  Wire2.begin();
+  rtcReady = rtc.begin(&Wire2);
+  if (rtcReady && FORCE_SET_RTC_AT_BOOT) {
+    rtc.adjust(DateTime(RTC_SET_YEAR, RTC_SET_MONTH, RTC_SET_DAY,
+                        RTC_SET_HOUR, RTC_SET_MINUTE, RTC_SET_SECOND));
+  }
+
+  // Initialize filter state with the current potentiometer value to avoid startup jump.
+  potFilteredAdc = (float)analogRead(PIN_POT);
+
+  if (!loadSequenceFromEeprom()) {
+    buildDefaultSequence();
+  }
+
+  startIdleMode();
+  lastIdleAllowed = isIdleAllowedNow();
+}
+
+void loop() {
+  logRtcEvery10s();
+
+  if (isButtonPressedEvent() && mode == MODE_IDLE) {
+    startRecordMode();
+  }
+
+  bool idleAllowed = isIdleAllowedNow();
+  if (mode == MODE_IDLE && idleAllowed && !lastIdleAllowed) {
+    // Restart sequence exactly when entering the daily active window.
+    startIdleMode();
+  }
+  lastIdleAllowed = idleAllowed;
+
+  unsigned long elapsedMs = millis() - modeStartMs;
+
+  if (mode == MODE_RECORD) {
+    updateTargetFromRecord(elapsedMs);
+
+    if (elapsedMs >= SEQUENCE_MS) {
+      saveSequenceToEeprom();
+      startIdleMode();
+    }
+  } else {
+    if (idleAllowed) {
+      setEnable(true);
+      updateTargetFromIdlePlayback(elapsedMs);
+    } else {
+      // Outside schedule: hold current position and disable driver heating.
+      targetPosition = currentPosition;
+      setEnable(false);
+    }
+  }
+
+  runMotionController();
+}
