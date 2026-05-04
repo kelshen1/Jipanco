@@ -7,9 +7,9 @@
 int DIR=5; // Direction pin
 int PUL=6; // Pulse pin
 int ENA=19; // Enable Pin
-int REV=1600; // Pulse/Rev calibré sur le Driver
-int VIT=50; // Vitesse choisie
-int DLY=REV/VIT; // (2,5 minimum !!)
+int REV=400; // Pulse/Rev calibré sur le Driver
+int TIME=250; // temps par tour (en millisecondes)
+int DLY=TIME*1000/REV; // (2,5 minimum !!)
 
 void setup() {
  pinMode (ENA, OUTPUT);
@@ -20,7 +20,7 @@ void setup() {
 }
 void loop() {
  digitalWrite(DIR,LOW);
- delayMicroseconds(60);
+ delayMicroseconds(1000000);
  for (int i=0; i<REV+1; i++)
  {
  digitalWrite(PUL,HIGH);
@@ -28,9 +28,8 @@ void loop() {
  digitalWrite(PUL,LOW);
  delayMicroseconds(DLY);
  }
- delayMicroseconds(1000);
  digitalWrite(DIR,HIGH);
- delayMicroseconds(60);
+ delayMicroseconds(1000000);
  for (int i=0; i<REV+1; i++)
  {
  digitalWrite(PUL,HIGH);
@@ -38,5 +37,5 @@ void loop() {
  digitalWrite(PUL,LOW);
  delayMicroseconds(DLY);
  }
- delayMicroseconds(1000);
+
 }
