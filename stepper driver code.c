@@ -7,9 +7,9 @@
 int DIR=5; // Direction pin
 int PUL=6; // Pulse pin
 int ENA=19; // Enable Pin
-
 int REV=1600; // Pulse/Rev calibré sur le Driver
-int DLY=30; // Delay between pulses (min 25) pour reguler la vitesse 
+int VIT=50; // Vitesse choisie
+int DLY=REV/VIT; // (2,5 minimum !!)
 
 void setup() {
  pinMode (ENA, OUTPUT);
