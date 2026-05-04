@@ -30,6 +30,7 @@ void loop() {
  digitalWrite(PUL,LOW);
  delayMicroseconds(DLY);
  }
+ delayMicroseconds(1000);
  digitalWrite(DIR,HIGH);
  delayMicroseconds(60);
  for (int i=0; i<REV+1; i++)
@@ -39,4 +40,5 @@ void loop() {
  digitalWrite(PUL,LOW);
  delayMicroseconds(DLY);
  }
+ delayMicroseconds(1000);
 }
