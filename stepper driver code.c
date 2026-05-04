@@ -15,11 +15,9 @@ void setup() {
  pinMode (ENA, OUTPUT);
  pinMode (DIR, OUTPUT);
  pinMode (PUL, OUTPUT);
+ digitalWrite(ENA,LOW); // initialisation
+ delayMicroseconds(100);
 }
-
-digitalWrite(ENA,LOW); // initialisation
-delayMicroseconds(100);
-
 void loop() {
  digitalWrite(DIR,LOW);
  delayMicroseconds(60);
