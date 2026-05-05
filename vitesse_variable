@@ -1,0 +1,14 @@
+#include <AccelStepper.h>
+
+AccelStepper stepper(AccelStepper::DRIVER, 6, 5); 
+// STEP = 6, DIR = 5
+
+void setup() {
+  stepper.setMaxSpeed(1000);     // vitesse max (pas/s)
+  stepper.setAcceleration(500);  // accélération (pas/s²)
+}
+
+void loop() {
+  stepper.setSpeed(300);         // vitesse souhaitée
+  stepper.runSpeed();            // rotation continue
+}
